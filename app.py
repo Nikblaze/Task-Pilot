@@ -6,6 +6,12 @@ One process serves three things:
   3. GET  /dashboard         a web page you open in any browser (nothing to install)
 """
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -21,6 +27,15 @@ from telegram_api import send_message, answer_callback, set_webhook, button
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me").strip()
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "change-me").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+
+if DASHBOARD_TOKEN == "change-me":
+    print("WARNING: DASHBOARD_TOKEN is unset — using default 'change-me'. Set DASHBOARD_TOKEN in Railway.")
+if WEBHOOK_SECRET == "change-me":
+    print("WARNING: WEBHOOK_SECRET is unset — using default 'change-me'. Set WEBHOOK_SECRET in Railway.")
+if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+    print("WARNING: TELEGRAM_BOT_TOKEN is unset — Telegram bot will not work.")
+if not PUBLIC_URL:
+    print("WARNING: PUBLIC_URL is unset — webhook will not be registered.")
 
 TYPE_EMOJI = {"task": "✅", "commitment": "🤝", "idea": "💡", "note": "📝"}
 
@@ -365,6 +380,17 @@ async def setup(token: str = ""):
     if not PUBLIC_URL:
         return "Set PUBLIC_URL env var first."
     res = await set_webhook(f"{PUBLIC_URL}/tg/{WEBHOOK_SECRET}", WEBHOOK_SECRET)
+    if not res.get("ok"):
+        err = res.get("description", str(res))
+        hint = "Check env vars and retry."
+        if res.get("error_code") == 404:
+            hint = "TELEGRAM_BOT_TOKEN is missing or invalid."
+        elif "resolve host" in err.lower() or "bad webhook" in err.lower():
+            hint = (
+                f"PUBLIC_URL ({PUBLIC_URL}) is not reachable from the internet. "
+                "Use your real Railway domain or a running ngrok https URL — not localhost or a placeholder."
+            )
+        return f"setWebhook FAILED: {res}\n\n{hint}"
     return f"setWebhook -> {res}"
 
 

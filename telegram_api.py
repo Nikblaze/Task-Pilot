@@ -2,11 +2,13 @@
 import os
 import httpx
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-API = f"https://api.telegram.org/bot{TOKEN}"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
 
 
 async def _call(method, **payload):
+    if not TOKEN:
+        return {"ok": False, "error_code": 401, "description": "TELEGRAM_BOT_TOKEN not set"}
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(f"{API}/{method}", json=payload)
         return r.json()
