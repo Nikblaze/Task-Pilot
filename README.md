@@ -17,9 +17,8 @@ You (Telegram) → webhook → Claude Haiku parses → SQLite → scheduler → 
 1. **A Telegram bot token** — open Telegram, message **@BotFather**, send `/newbot`,
    pick a name and a username ending in `bot`. It replies with a token like
    `8012345678:AAH...`. Copy it.
-2. **An Anthropic API key** — sign in at https://console.anthropic.com → *API keys* →
-   *Create key*. Add a few dollars of credit under *Billing*; this bot spends a few
-   **cents** a month (Haiku is $1 / $5 per million tokens and each note is tiny).
+2. **An LLM API key** — Sarvam (recommended), Groq, or any OpenAI-compatible provider.
+   Sarvam: https://dashboard.sarvam.ai → create a key. Use model `sarvam-30b`.
 3. **Two random secrets you invent** — any long random strings, one for
    `WEBHOOK_SECRET` and one for `DASHBOARD_TOKEN`. (Mash the keyboard, ~30 chars each.)
 
@@ -57,7 +56,9 @@ This guide uses **Railway**. The other hosts use the same env vars and the inclu
 
 ```
 TELEGRAM_BOT_TOKEN=8012345678:AAH...
-ANTHROPIC_API_KEY=sk-ant-...
+API_KEY=sk_...your-sarvam-or-groq-key...
+MODEL=sarvam-30b
+LLM_BASE_URL=https://api.sarvam.ai/v1
 WEBHOOK_SECRET=your-long-random-string
 DASHBOARD_TOKEN=your-other-long-random-string
 TIMEZONE=Asia/Kolkata
