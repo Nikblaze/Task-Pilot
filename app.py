@@ -18,8 +18,8 @@ import llm
 import planner as P
 from telegram_api import send_message, answer_callback, set_webhook, button
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me")
-DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "change-me")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me").strip()
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "change-me").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
 TYPE_EMOJI = {"task": "✅", "commitment": "🤝", "idea": "💡", "note": "📝"}
@@ -360,7 +360,7 @@ async def health():
 
 @app.get("/setup", response_class=PlainTextResponse)
 async def setup(token: str = ""):
-    if token != DASHBOARD_TOKEN:
+    if token.strip() != DASHBOARD_TOKEN:
         raise HTTPException(403, "bad token")
     if not PUBLIC_URL:
         return "Set PUBLIC_URL env var first."
@@ -445,7 +445,7 @@ async def telegram_webhook(secret: str, request: Request):
 # ----------------------------------------------------------------------------
 @app.get("/api/items")
 async def api_items(token: str = ""):
-    if token != DASHBOARD_TOKEN:
+    if token.strip() != DASHBOARD_TOKEN:
         raise HTTPException(403, "bad token")
     now = P.now()
     soon = now + timedelta(days=2)

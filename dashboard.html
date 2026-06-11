@@ -65,7 +65,7 @@ const TITLES={overdue:"Overdue",start_today:"Start today",due_soon:"Due soon",
   commitments:"Commitments",ideas:"Ideas",other:"Everything else"};
 const EDGE={overdue:"edge-red",start_today:"edge-amber"};
 
-function token(){ return new URLSearchParams(location.search).get("token")||""; }
+function token(){ return (new URLSearchParams(location.search).get("token")||"").trim(); }
 
 function tick(){
   const d=new Date();
@@ -100,10 +100,12 @@ function sectionHTML(key,items){
 
 async function load(){
   if(!token()){ document.getElementById("root").innerHTML=
-    `<div class="gate">Add your access token to the URL: <code>?token=…</code></div>`; return; }
+    `<div class="gate">Add <code>?token=YOUR_DASHBOARD_TOKEN</code> to this URL.<br><br>
+     Example:<br><code>${location.origin}/dashboard?token=…</code></div>`; return; }
   try{
     const r=await fetch("/api/items?token="+encodeURIComponent(token()));
-    if(!r.ok) throw new Error(r.status);
+    if(r.status===403) throw new Error("invalid token — must match DASHBOARD_TOKEN in Railway exactly");
+    if(!r.ok) throw new Error("HTTP "+r.status);
     const data=await r.json();
     const b=data.buckets;
     const order=["overdue","start_today","due_soon","commitments","ideas","other"];
