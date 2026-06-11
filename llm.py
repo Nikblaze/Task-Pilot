@@ -1,14 +1,26 @@
-"""LLM layer. Uses Claude Haiku to turn a messy one-line note into structure.
+"""LLM layer. Uses an OpenAI-compatible API to turn a messy one-line note into structure.
 
-Only two tiny calls exist, both with small payloads, so cost is a few cents/month.
+Configure via env vars:
+  API_KEY       — provider API key (Sarvam, Groq, etc.)
+  MODEL         — model id (e.g. sarvam-30b, llama-3.3-70b-versatile)
+  LLM_BASE_URL  — OpenAI-compatible base URL (default: Sarvam)
+
+Only two tiny calls exist, both with small payloads.
 Everything else (briefings, reminders) is computed deterministically in Python.
 """
 import os
 import json
-import anthropic
+from openai import OpenAI
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
-_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+# import anthropic
+# MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+# _client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+
+API_KEY = os.environ["API_KEY"]
+MODEL = os.getenv("MODEL", "sarvam-30b")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.sarvam.ai/v1")
+
+_client = OpenAI(api_key=API_KEY, base_url=LLM_BASE_URL)
 
 _CAPTURE_SYSTEM = """You convert a short personal work note into JSON for a task tracker.
 Return ONLY a JSON object, no prose, no markdown fences.
@@ -48,16 +60,12 @@ def _extract_json(text):
 def parse_capture(note, now_iso, tz_name):
     """Returns a dict with type/title/person/due/effort_minutes/explicit_reminder."""
     try:
-        msg = _client.messages.create(
-            model=MODEL,
-            max_tokens=400,
-            system=_CAPTURE_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": f"Current datetime: {now_iso} (timezone {tz_name}).\nNote: {note}",
-            }],
+        resp = _client.chat.completions.create(
+            model=MODEL, max_tokens=400,
+            messages=[{"role": "system", "content": _CAPTURE_SYSTEM},
+                        {"role": "user", "content": f"Current datetime: {now_iso} ({tz_name}).\nNote: {note}"}],
         )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        text = resp.choices[0].message.content
         data = _extract_json(text)
     except Exception:
         data = {}
@@ -75,16 +83,12 @@ def parse_capture(note, now_iso, tz_name):
 def parse_when(phrase, now_iso, tz_name):
     """Parse a snooze/reschedule phrase into an ISO datetime, or None."""
     try:
-        msg = _client.messages.create(
-            model=MODEL,
-            max_tokens=60,
-            system=_WHEN_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": f"Current datetime: {now_iso} (timezone {tz_name}).\nPhrase: {phrase}",
-            }],
+        resp = _client.chat.completions.create(
+            model=MODEL, max_tokens=60,
+            messages=[{"role": "system", "content": _WHEN_SYSTEM},
+                        {"role": "user", "content": f"Current datetime: {now_iso} ({tz_name}).\nPhrase: {phrase}"}],
         )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
+        text = resp.choices[0].message.content.strip()
         return None if text.lower().startswith("null") else text
     except Exception:
         return None
