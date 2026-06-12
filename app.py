@@ -591,6 +591,26 @@ async def health():
     return "TaskPilot is running."
 
 
+@app.get("/diag")
+async def diag():
+    """Non-secret env diagnostic: reports which vars are SET and their length only —
+    never the values. Open https://YOUR-URL/diag to see what the running process has."""
+    def info(name):
+        v = os.getenv(name, "")
+        return {"set": bool(v.strip()), "len": len(v.strip())}
+
+    return {
+        "TELEGRAM_BOT_TOKEN": info("TELEGRAM_BOT_TOKEN"),
+        "DASHBOARD_TOKEN": {**info("DASHBOARD_TOKEN"),
+                            "is_default": DASHBOARD_TOKEN == "change-me"},
+        "WEBHOOK_SECRET": {**info("WEBHOOK_SECRET"),
+                           "is_default": WEBHOOK_SECRET == "change-me"},
+        "PUBLIC_URL": {"set": bool(PUBLIC_URL), "value": PUBLIC_URL},  # not secret
+        "API_KEY": info("API_KEY"),
+        "expected_webhook_url": f"{PUBLIC_URL}/tg/{'*' * len(WEBHOOK_SECRET)}" if PUBLIC_URL else None,
+    }
+
+
 @app.get("/setup", response_class=PlainTextResponse)
 async def setup(token: str = ""):
     if token.strip() != DASHBOARD_TOKEN:
