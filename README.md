@@ -1,14 +1,30 @@
-# TaskPilot — your Telegram capture + reminder bot
+# TaskPilot — your Personal Chief of Staff (Telegram)
 
-Type (or paste) anything into Telegram — a task, a promise you made someone, an idea —
-and TaskPilot files it, figures out the deadline and effort, and reminds you **when you
-need to start**, not when it's already due. A web dashboard (nothing to install) gives
-you the bird's-eye view and your weekly timelog.
+Type (or paste) anything into Telegram — a task, a promise you made someone, something
+you're waiting on, an idea — and TaskPilot files it, figures out the deadline and effort,
+and reminds you **when you need to start**, not when it's already due. It also watches
+your **capacity**: if a new commitment overloads a day or your week, it warns you on the
+spot. Each evening it asks how much is left on what's in flight, so the numbers stay
+honest, and Friday's review shows what you finished vs missed. A web dashboard (nothing
+to install) gives the bird's-eye view.
 
 ```
-You (Telegram) → webhook → Claude Haiku parses → SQLite → scheduler → reminders back to you
-                                                        ↘ /dashboard web page
+You (Telegram) → webhook → LLM parses → SQLite → scheduler → reminders / briefs / check-ins
+                                                       ↘ /dashboard web page (capacity + buckets)
 ```
+
+### What it does (V0+V1)
+
+- **Capture** anything in <5s; AI extracts type, person, deadline, effort.
+- **Backward-planned reminders** — `start_by = due − effort − buffer`, snapped to work hours.
+- **Capacity engine** — effort spread across the start→due window; warns on day/week overflow.
+- **Evening check-in** (`/checkin`, auto at `WORK_END_HOUR−1`) — recalc remaining effort.
+- **Waiting** — track things you're blocked on; stale-wait nudges; `/waiting`.
+- **Daily brief** (`/today`, auto at `WORK_START_HOUR`) — priorities, **at-risk**, capacity.
+- **Weekly review** (`/week`) — completed vs **missed**, plus a timelog with logged hours.
+
+Voice/screenshot capture, calendar integration, and a negotiation assistant are the
+documented next steps (see `PCS/07_Roadmap` and `docs/superpowers/`).
 
 ---
 
@@ -105,10 +121,19 @@ That's it — you're live.
 - **Capture:** just type. No need to pick a category — it's inferred.
 - **Reminders** arrive with buttons: *Done* · *Starting now* · *Remind tonight* ·
   *Tomorrow 9am* · *Pick date & time*. Tap one; no typing needed.
-- **`/today`** — your briefing on demand. **`/list`** — open items. **`/ideas`** —
-  parked ideas. **`/week`** — this week's timelog. **`/done 12`** — mark item #12 complete.
-- The **morning briefing** auto-sends at `WORK_START_HOUR` and surfaces what to start
-  today, what's due soon, and your commitments.
+- **`/today`** — briefing on demand (priorities, at-risk, capacity). **`/checkin`** —
+  evening "how much is left?" check-in. **`/list`** — open items. **`/waiting`** —
+  things you're waiting on others for. **`/ideas`** — parked ideas. **`/week`** — weekly
+  review (done vs missed + timelog). **`/done 12`** — mark item #12 complete.
+- The **morning briefing** auto-sends at `WORK_START_HOUR`; the **evening check-in**
+  auto-sends at `WORK_END_HOUR − 1`.
+
+### Capacity tuning (optional)
+
+Defaults: **6h/day**, **30h/week**, working days **Mon–Fri**. These live in the
+`settings` table (keys `cap_day_min`, `cap_week_min`, `work_days`) so they can be changed
+without redeploying. `STALE_WAITING_DAYS` (env, default `3`) controls when a "waiting"
+item nudges you. See `docs/superpowers/DECISIONS.md` for every default and why.
 
 ---
 

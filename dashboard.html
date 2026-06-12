@@ -60,10 +60,31 @@
 
 <script>
 const COLORS={overdue:"var(--red)",start_today:"var(--amber)",due_soon:"var(--teal)",
-  commitments:"var(--pink)",ideas:"var(--accent)",other:"var(--faint)"};
-const TITLES={overdue:"Overdue",start_today:"Start today",due_soon:"Due soon",
-  commitments:"Commitments",ideas:"Ideas",other:"Everything else"};
+  commitments:"var(--pink)",waiting:"var(--amber)",ideas:"var(--accent)",other:"var(--faint)"};
+const TITLES={overdue:"Overdue / missed",start_today:"Start today",due_soon:"Due soon",
+  commitments:"Commitments",waiting:"Waiting on others",ideas:"Ideas",other:"Everything else"};
 const EDGE={overdue:"edge-red",start_today:"edge-amber"};
+
+function capBar(label,used,cap){
+  const pct=cap?Math.min(100,Math.round(used/cap*100)):0;
+  const over=cap&&used>cap;
+  const col=over?"var(--red)":(pct>80?"var(--amber)":"var(--teal)");
+  const h=v=>Math.round(v/60*10)/10+"h";
+  return `<div style="padding:11px 16px;border-bottom:1px solid var(--line)">
+    <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--mut);margin-bottom:6px">
+      <span>${label}</span><span style="font-family:var(--mono)">${h(used)} / ${h(cap)}${over?" ⚠️":""}</span></div>
+    <div style="height:7px;border-radius:4px;background:var(--panel2);overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:${col}"></div></div></div>`;
+}
+
+function capacityHTML(c){
+  if(!c) return "";
+  return `<section>
+    <div class="head"><span class="tag" style="background:var(--teal)"></span>
+      <h2>Capacity</h2></div>
+    ${capBar("Today",c.today_min,c.cap_day_min)}
+    ${capBar("This week",c.week_min,c.cap_week_min)}</section>`;
+}
 
 function token(){ return (new URLSearchParams(location.search).get("token")||"").trim(); }
 
@@ -108,8 +129,9 @@ async function load(){
     if(!r.ok) throw new Error("HTTP "+r.status);
     const data=await r.json();
     const b=data.buckets;
-    const order=["overdue","start_today","due_soon","commitments","ideas","other"];
-    let html=order.filter(k=>b[k] && (b[k].length||k==="start_today"))
+    const order=["overdue","start_today","due_soon","commitments","waiting","ideas","other"];
+    let html=capacityHTML(data.capacity);
+    html+=order.filter(k=>b[k] && (b[k].length||k==="start_today"))
                   .map(k=>sectionHTML(k,b[k])).join("");
     html+=`<section class="wide">
       <div class="head"><span class="tag" style="background:var(--teal)"></span>

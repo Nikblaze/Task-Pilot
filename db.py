@@ -25,6 +25,16 @@ def _conn():
         c.close()
 
 
+# Columns added after the original schema shipped. SQLite has no
+# "ADD COLUMN IF NOT EXISTS", so each is attempted and the duplicate error swallowed.
+_MIGRATIONS = [
+    "ALTER TABLE items ADD COLUMN remaining_effort_min INTEGER",
+    "ALTER TABLE items ADD COLUMN actual_effort_min INTEGER",
+    "ALTER TABLE items ADD COLUMN last_checkin_at TEXT",
+    "ALTER TABLE items ADD COLUMN waiting_since TEXT",     # when a 'waiting' item was last nudged
+]
+
+
 def init_db():
     with _conn() as c:
         c.executescript(
@@ -61,8 +71,20 @@ def init_db():
                 action  TEXT,
                 item_id INTEGER
             );
+            CREATE TABLE IF NOT EXISTS checkins (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id              INTEGER,
+                ts                   TEXT,
+                remaining_before_min INTEGER,
+                remaining_after_min  INTEGER
+            );
             """
         )
+        for stmt in _MIGRATIONS:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 # ---------- settings ----------
@@ -84,7 +106,11 @@ def set_setting(key, value):
 # ---------- items ----------
 def add_item(**f):
     cols = ["type", "title", "raw", "person", "due_at", "effort_min",
-            "start_by_at", "remind_at", "status", "created_at"]
+            "remaining_effort_min", "start_by_at", "remind_at", "status",
+            "created_at", "waiting_since"]
+    # remaining_effort defaults to the initial effort estimate
+    if f.get("remaining_effort_min") is None:
+        f["remaining_effort_min"] = f.get("effort_min")
     vals = [f.get(k) for k in cols]
     with _conn() as c:
         cur = c.execute(
@@ -165,3 +191,53 @@ def get_pending(chat_id):
 def clear_pending(chat_id):
     with _conn() as c:
         c.execute("DELETE FROM pending WHERE chat_id=?", (chat_id,))
+
+
+# ---------- capacity ----------
+def schedulable_open():
+    """Open tasks/commitments with a deadline — the items that consume capacity."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE status='open' "
+            "AND type IN ('task','commitment') AND due_at IS NOT NULL"
+        ).fetchall()
+
+
+# ---------- waiting ----------
+def list_waiting():
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE type='waiting' AND status='open' ORDER BY id DESC"
+        ).fetchall()
+
+
+# ---------- missed / weekly review ----------
+def missed_before(now_iso):
+    """Open items whose deadline has passed (a missed commitment/task)."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE status='open' "
+            "AND type IN ('task','commitment') AND due_at IS NOT NULL AND due_at < ? "
+            "ORDER BY due_at ASC",
+            (now_iso,),
+        ).fetchall()
+
+
+def completed_between(start_iso, end_iso):
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE status='done' "
+            "AND done_at IS NOT NULL AND done_at >= ? AND done_at <= ? "
+            "ORDER BY done_at ASC",
+            (start_iso, end_iso),
+        ).fetchall()
+
+
+# ---------- check-ins ----------
+def add_checkin(item_id, ts, before_min, after_min):
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO checkins(item_id,ts,remaining_before_min,remaining_after_min) "
+            "VALUES(?,?,?,?)",
+            (item_id, ts, before_min, after_min),
+        )

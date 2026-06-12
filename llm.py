@@ -66,13 +66,17 @@ _CAPTURE_SYSTEM = """You convert a short personal work note into JSON for a task
 Return ONLY a JSON object, no prose, no markdown fences.
 
 Fields:
-- "type": one of "task", "commitment", "idea", "note".
+- "type": one of "task", "commitment", "waiting", "idea", "note".
     commitment = the user promised something to a named person.
     task = something the user must do, with or without a deadline.
+    waiting = the user is blocked, waiting on someone ELSE to deliver/reply
+        ("waiting on Sneha for the API key", "pending Raj's approval"). The user is
+        NOT the one doing the work here.
     idea = something to explore later, no deadline.
     note = anything else.
 - "title": a concise imperative summary (max ~10 words).
-- "person": the other person's name if this involves/was promised to someone, else null.
+- "person": the other person's name if this involves/was promised to someone (or, for
+    "waiting", the person you are waiting ON), else null.
 - "due": ISO 8601 datetime in the given timezone if a deadline is stated or implied, else null.
     Resolve relative dates ("Mon", "tomorrow", "EOD Friday") against the given current datetime.
     If a date has no time, assume 18:00 local (end of day).

@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 import db
 import llm
 import planner as P
+import capacity as C
 from telegram_api import send_message, answer_callback, set_webhook, button
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me").strip()
@@ -37,7 +38,18 @@ if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
 if not PUBLIC_URL:
     print("WARNING: PUBLIC_URL is unset — webhook will not be registered.")
 
-TYPE_EMOJI = {"task": "✅", "commitment": "🤝", "idea": "💡", "note": "📝"}
+TYPE_EMOJI = {"task": "✅", "commitment": "🤝", "waiting": "⏳", "idea": "💡", "note": "📝"}
+
+STALE_WAITING_DAYS = float(os.getenv("STALE_WAITING_DAYS", "3"))
+
+
+def capacity_settings():
+    """Capacity config from settings, with safe defaults (see DECISIONS.md)."""
+    return {
+        "cap_day_min": db.get_setting("cap_day_min", C.DEFAULT_CAP_DAY_MIN),
+        "cap_week_min": db.get_setting("cap_week_min", C.DEFAULT_CAP_WEEK_MIN),
+        "work_days": db.get_setting("work_days", C.DEFAULT_WORK_DAYS),
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -49,6 +61,9 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone=str(P.TZ))
     scheduler.add_job(reminder_tick, "interval", seconds=60, id="tick")
     scheduler.add_job(send_briefing, "cron", hour=P.WORK_START, minute=0, id="briefing")
+    # evening check-in one hour before the workday ends (see DECISIONS.md #12)
+    checkin_hour = max(P.WORK_START, P.WORK_END - 1)
+    scheduler.add_job(send_checkin, "cron", hour=checkin_hour, minute=0, id="checkin")
     scheduler.start()
     if PUBLIC_URL:
         try:
@@ -106,12 +121,14 @@ async def handle_capture(chat_id, text):
     explicit = P.parse_iso(parsed["explicit_reminder"])
     start_by = P.compute_start_by(due, effort) if due else None
     remind_at = explicit  # an explicit "remind me at X" wins as the next ping
+    is_waiting = parsed["type"] == "waiting"
 
     item_id = db.add_item(
         type=parsed["type"], title=parsed["title"], raw=text,
         person=parsed["person"], due_at=P.to_iso(due), effort_min=effort,
         start_by_at=P.to_iso(start_by), remind_at=P.to_iso(remind_at),
         status="open", created_at=now.isoformat(),
+        waiting_since=now.isoformat() if is_waiting else None,
     )
     db.add_event(item_id, "created", now.isoformat())
 
@@ -119,17 +136,29 @@ async def handle_capture(chat_id, text):
     em = TYPE_EMOJI.get(parsed["type"], "•")
     msg = f"{em} Captured <b>#{item_id}</b> — {parsed['type']}\n<b>{parsed['title']}</b>"
     if parsed["person"]:
-        msg += f"\n👤 {parsed['person']}"
+        label = "⏳ waiting on" if is_waiting else "👤"
+        msg += f"\n{label} {parsed['person']}"
     if due:
         msg += f"\n⏰ due {P.fmt(due)}"
     if effort:
         msg += f"  ·  ~{effort // 60}h {effort % 60}m".replace(" 0m", "")
-    if start_by:
+    if is_waiting:
+        msg += "\n⏳ tracked — I'll nudge you if it goes stale (/waiting to review)"
+    elif start_by:
         msg += f"\n🟠 I'll nudge you to start by {P.fmt(start_by)}"
     elif explicit:
         msg += f"\n🔔 reminder set for {P.fmt(explicit)}"
     elif parsed["type"] in ("idea", "note"):
         msg += "\n💡 parked — no deadline, won't nag you"
+
+    # capacity warning (warn + still save) — only for schedulable items that just landed
+    if parsed["type"] in ("task", "commitment") and due:
+        items = [dict(r) for r in db.schedulable_open()]
+        focus = next((i for i in items if i["id"] == item_id), None)
+        over = C.check_overflow(items, now.date(), capacity_settings(), focus_item=focus)
+        warn = C.overflow_warning(over)
+        if warn:
+            msg += f"\n\n{warn}"
     await send_message(chat_id, msg)
 
 
@@ -148,7 +177,7 @@ async def cmd_start(chat_id):
         "• <i>commit to investigate caching for Sneha, by Mon, 3h</i>\n"
         "• <i>idea: batch the webhook calls to cut latency</i>\n"
         "• <i>deploy payments API friday eod</i>\n\n"
-        "Commands: /today  /week  /list  /ideas  /dashboard  /help",
+        "Commands: /today  /checkin  /week  /list  /waiting  /ideas  /dashboard  /help",
     )
 
 
@@ -172,6 +201,27 @@ async def cmd_ideas(chat_id):
         return
     body = "\n".join(f"💡 <b>#{i['id']}</b> {i['title']}" for i in items)
     await send_message(chat_id, f"<b>Parked ideas</b>\n\n{body}")
+
+
+async def cmd_waiting(chat_id):
+    items = db.list_waiting()
+    if not items:
+        await send_message(chat_id, "Not waiting on anyone. ⏳")
+        return
+    now = P.now()
+    lines = []
+    for i in items:
+        since = P.parse_iso(i["created_at"])
+        days = (now - since).days if since else 0
+        who = f" · on {i['person']}" if i["person"] else ""
+        age = f" ({days}d)" if days else ""
+        lines.append(f"⏳ <b>#{i['id']}</b> {i['title']}{who}{age}")
+    body = "\n".join(lines)
+    await send_message(chat_id, f"<b>Waiting on others</b>\n\n{body}\n\nClear: /done &lt;id&gt;")
+
+
+async def cmd_checkin(chat_id):
+    await start_checkin(chat_id)
 
 
 async def cmd_week(chat_id):
@@ -202,10 +252,15 @@ async def cmd_help(chat_id):
         "Type anything to capture it. I figure out if it's a task, a commitment, "
         "or an idea, pull out the deadline and effort, and schedule reminders so you "
         "start in time — not when it's already due.\n\n"
-        "/today — your briefing now\n"
+        "I also watch your <b>capacity</b> — if a new commitment overloads a day or "
+        "your week, I'll warn you when you capture it. Each evening I check how much "
+        "is left on what's in flight, so the numbers stay honest.\n\n"
+        "/today — your briefing now (priorities, risks, capacity)\n"
+        "/checkin — evening 'how much is left?' check-in\n"
         "/list — open tasks &amp; commitments\n"
+        "/waiting — things you're waiting on others for\n"
         "/ideas — parked ideas\n"
-        "/week — this week's timelog\n"
+        "/week — weekly review: done vs missed + timelog\n"
         "/done &lt;id&gt; — mark complete\n"
         "/dashboard — open the web view",
     )
@@ -220,7 +275,15 @@ async def mark_done(chat_id, item_id):
         await send_message(chat_id, f"#{item_id} not found.")
         return
     now = P.now()
-    db.update_item(item_id, status="done", done_at=now.isoformat(), remind_at=None)
+    # Log effort: whatever was still remaining is now spent, added to any prior actual.
+    remaining = item["remaining_effort_min"]
+    if remaining is None:
+        remaining = item["effort_min"]
+    actual = (item["actual_effort_min"] or 0) + (remaining or 0)
+    db.update_item(
+        item_id, status="done", done_at=now.isoformat(), remind_at=None,
+        remaining_effort_min=0, actual_effort_min=actual,
+    )
     db.add_event(item_id, "done", now.isoformat())
     await send_message(chat_id, f"✅ Done — <b>#{item_id}</b> {item['title']}")
 
@@ -259,6 +322,96 @@ async def handle_callback(chat_id, cb_id, data):
         await answer_callback(cb_id)
         await send_message(chat_id, "📅 Send the date & time (e.g. <i>Fri 3pm</i> or <i>tomorrow 10am</i>).")
 
+    elif action == "ck":
+        # data is "ck:<choice>:<id>"; sid still holds "<choice>:<id>"
+        choice, _, cid = sid.partition(":")
+        item = db.get_item(int(cid)) if cid.isdigit() else None
+        if not item:
+            await answer_callback(cb_id, "Item gone")
+            return
+        if choice == "custom":
+            db.set_pending(chat_id, "checkin_remaining", item["id"])
+            await answer_callback(cb_id)
+            await send_message(chat_id, "How much is left? e.g. <i>2h</i>, <i>30m</i>, or <i>done</i>.")
+            return
+        if choice == "keep":
+            rem = apply_checkin(item, _rem_of(item) or 0)
+        else:  # "25" / "50" / "75" percent of the original estimate still remaining
+            base = item["effort_min"] or _rem_of(item) or P.DEFAULT_EFFORT_MIN
+            rem = apply_checkin(item, round(base * int(choice) / 100))
+        await answer_callback(cb_id, f"Updated — {rem // 60}h{rem % 60:02d}m left")
+
+
+# ----------------------------------------------------------------------------
+# evening check-in (effort-truth loop that feeds capacity)
+# ----------------------------------------------------------------------------
+def active_checkin_items():
+    """Open tasks/commitments that are in flight — worth asking 'how much is left?'."""
+    now = P.now()
+    soon = now + timedelta(days=2)
+    out = []
+    for i in db.list_open():
+        if i["type"] not in ("task", "commitment") or not i["due_at"]:
+            continue
+        sb = P.parse_iso(i["start_by_at"])
+        due = P.parse_iso(i["due_at"])
+        if (sb and sb <= now) or (due and due <= soon):
+            out.append(i)
+    return out
+
+
+def checkin_buttons(item_id):
+    return [
+        [button("✅ Done", f"done:{item_id}"), button("On track", f"ck:keep:{item_id}")],
+        [button("¼ left", f"ck:25:{item_id}"), button("½ left", f"ck:50:{item_id}"),
+         button("¾ left", f"ck:75:{item_id}")],
+        [button("✏️ Custom", f"ck:custom:{item_id}")],
+    ]
+
+
+def _rem_of(item):
+    r = item["remaining_effort_min"]
+    return r if r is not None else item["effort_min"]
+
+
+def apply_checkin(item, new_remaining):
+    """Record a check-in: log work done since last, update remaining + actual effort."""
+    now = P.now()
+    before = _rem_of(item) or 0
+    new_remaining = max(0, int(new_remaining))
+    delta = max(0, before - new_remaining)  # effort spent since last check-in
+    actual = (item["actual_effort_min"] or 0) + delta
+    db.update_item(
+        item["id"], remaining_effort_min=new_remaining,
+        actual_effort_min=actual, last_checkin_at=now.isoformat(),
+    )
+    db.add_checkin(item["id"], now.isoformat(), before, new_remaining)
+    db.add_event(item["id"], "checkin", now.isoformat())
+    return new_remaining
+
+
+async def start_checkin(chat_id):
+    items = active_checkin_items()
+    if not items:
+        await send_message(chat_id, "🌙 Evening check-in: nothing in flight. Rest up. ✅")
+        return
+    await send_message(chat_id, "🌙 <b>Evening check-in</b> — how much is left on each?")
+    for i in items:
+        due = P.parse_iso(i["due_at"])
+        rem = _rem_of(i)
+        line = f"<b>#{i['id']}</b> {i['title']}"
+        if rem:
+            line += f"\n🕒 ~{rem // 60}h{rem % 60:02d}m left (est)"
+        if due:
+            line += f"\n⏰ due {P.fmt(due)}"
+        await send_message(chat_id, line, checkin_buttons(i["id"]))
+
+
+async def send_checkin():
+    oc = owner_chat()
+    if oc is not None:
+        await start_checkin(oc)
+
 
 # ----------------------------------------------------------------------------
 # reminders + briefing
@@ -293,6 +446,19 @@ async def reminder_tick():
             db.update_item(item["id"], sent_due=1)
             await _send_reminder(oc, item, "❗️Due now")
 
+    # 5) stale "waiting on someone" nudges
+    cutoff = now - timedelta(days=STALE_WAITING_DAYS)
+    for item in db.list_waiting():
+        since = P.parse_iso(item["waiting_since"]) or P.parse_iso(item["created_at"])
+        if since and since <= cutoff:
+            db.update_item(item["id"], waiting_since=now.isoformat())
+            who = f" from {item['person']}" if item["person"] else ""
+            await send_message(
+                oc,
+                f"⏳ Still waiting{who}: <b>{item['title']}</b>\n"
+                f"Maybe follow up? Clear with /done {item['id']}.",
+            )
+
 
 async def _send_reminder(chat_id, item, header):
     due = P.parse_iso(item["due_at"])
@@ -307,30 +473,56 @@ async def _send_reminder(chat_id, item, header):
     await send_message(chat_id, text, reminder_buttons(item["id"]))
 
 
+def _is_at_risk(item, now):
+    """At risk = its latest safe start time has passed but it isn't started/done yet."""
+    if item["type"] not in ("task", "commitment"):
+        return False
+    sb = P.parse_iso(item["start_by_at"])
+    due = P.parse_iso(item["due_at"])
+    if due and due < now:
+        return True   # already overdue
+    return bool(sb and sb < now and not item["sent_startby"])
+
+
 def build_briefing_text():
     now = P.now()
     today_end = now.replace(hour=23, minute=59)
     soon = now + timedelta(days=2)
     items = db.list_open()
-    start_today, due_soon, commits = [], [], []
+    start_today, due_soon, commits, at_risk = [], [], [], []
     for i in items:
         due = P.parse_iso(i["due_at"])
         sb = P.parse_iso(i["start_by_at"])
+        if _is_at_risk(i, now):
+            at_risk.append(i)
         if i["type"] == "commitment" and due and due <= soon:
             commits.append(i)
         if sb and sb <= today_end and not i["sent_startby"]:
             start_today.append(i)
         elif due and due <= soon:
             due_soon.append(i)
-    if not (start_today or due_soon or commits):
+    waiting = db.list_waiting()
+    if not (start_today or due_soon or commits or at_risk):
         return ""
     parts = [f"☀️ <b>Good morning — {now.strftime('%A %d %b')}</b>"]
-    if start_today:
-        parts.append("\n<b>Start today</b>\n" + "\n".join(line_for(i) for i in start_today))
-    if due_soon:
-        parts.append("\n<b>Due soon</b>\n" + "\n".join(line_for(i) for i in due_soon))
-    if commits:
-        parts.append("\n<b>Commitments</b>\n" + "\n".join(line_for(i) for i in commits))
+    # capacity line first — the "chief of staff" framing
+    sched = [dict(r) for r in db.schedulable_open()]
+    if sched:
+        parts.append("\n" + C.summary_text(sched, now.date(), capacity_settings()))
+    ar = {i["id"] for i in at_risk}  # shown once under At risk; don't repeat below
+    if at_risk:
+        parts.append("\n⚠️ <b>At risk</b>\n" + "\n".join(line_for(i) for i in at_risk))
+    start_rest = [i for i in start_today if i["id"] not in ar]
+    if start_rest:
+        parts.append("\n<b>Start today</b>\n" + "\n".join(line_for(i) for i in start_rest))
+    due_rest = [i for i in due_soon if i["id"] not in ar]
+    if due_rest:
+        parts.append("\n<b>Due soon</b>\n" + "\n".join(line_for(i) for i in due_rest))
+    commit_rest = [i for i in commits if i["id"] not in ar]
+    if commit_rest:
+        parts.append("\n<b>Commitments</b>\n" + "\n".join(line_for(i) for i in commit_rest))
+    if waiting:
+        parts.append(f"\n⏳ {len(waiting)} waiting on others — /waiting to review")
     ideas = db.list_by_type("idea")
     if ideas:
         parts.append(f"\n💡 {len(ideas)} idea(s) parked — /ideas to review")
@@ -346,23 +538,49 @@ async def send_briefing():
         await send_message(oc, text)
 
 
+def _hours(mins):
+    return f"{round((mins or 0) / 60, 1)}h"
+
+
 def build_timelog_text():
     now = P.now()
     monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0)
+
+    # --- weekly review summary: completed vs missed + logged effort ---
+    completed = db.completed_between(monday.isoformat(), now.isoformat())
+    missed = db.missed_before(now.isoformat())
+    logged_min = sum((i["actual_effort_min"] or 0) for i in completed)
+
+    summary = ["🗓 <b>Weekly review</b>"]
+    summary.append(
+        f"✅ {len(completed)} completed · ❗️ {len(missed)} missed · "
+        f"🕒 {_hours(logged_min)} logged"
+    )
+    if missed:
+        summary.append("\n<b>Missed (past due, still open)</b>")
+        for i in missed:
+            due = P.parse_iso(i["due_at"])
+            who = f" · for {i['person']}" if i["person"] else ""
+            summary.append(f"  · ❗️ #{i['id']} {i['title']}{who} (due {P.fmt(due)})")
+
+    # --- per-day activity log ---
     rows = db.events_between(monday.isoformat(), now.isoformat())
-    if not rows:
+    if rows:
+        by_day = {}
+        for r in rows:
+            ts = P.parse_iso(r["ts"])
+            key = ts.strftime("%a %d %b")
+            verb = {"created": "captured", "done": "✅ finished", "started": "started",
+                    "reminded": "reminded", "snoozed": "rescheduled",
+                    "checkin": "🕒 checked in"}.get(r["kind"], r["kind"])
+            by_day.setdefault(key, []).append(f"  · {verb}: {r['title'] or '(item)'}")
+        summary.append("\n<b>Activity</b>")
+        for day, lines in by_day.items():
+            summary.append(f"\n<b>{day}</b>\n" + "\n".join(lines))
+    elif not completed and not missed:
         return "No activity logged this week yet."
-    by_day = {}
-    for r in rows:
-        ts = P.parse_iso(r["ts"])
-        key = ts.strftime("%a %d %b")
-        verb = {"created": "captured", "done": "✅ finished", "started": "started",
-                "reminded": "reminded", "snoozed": "rescheduled"}.get(r["kind"], r["kind"])
-        by_day.setdefault(key, []).append(f"  · {verb}: {r['title'] or '(item)'}")
-    out = ["🗓 <b>This week</b>"]
-    for day, lines in by_day.items():
-        out.append(f"\n<b>{day}</b>\n" + "\n".join(lines))
-    return "\n".join(out)
+
+    return "\n".join(summary)
 
 
 # ----------------------------------------------------------------------------
@@ -436,6 +654,10 @@ async def telegram_webhook(secret: str, request: Request):
             await cmd_ideas(chat_id)
         elif cmd == "week":
             await cmd_week(chat_id)
+        elif cmd == "waiting":
+            await cmd_waiting(chat_id)
+        elif cmd == "checkin":
+            await cmd_checkin(chat_id)
         elif cmd == "dashboard":
             await cmd_dashboard(chat_id)
         elif cmd == "done":
@@ -462,6 +684,22 @@ async def telegram_webhook(secret: str, request: Request):
             await send_message(chat_id, "Couldn't read that time — try again with /list then tap the item.")
         return JSONResponse({"ok": True})
 
+    # waiting for a "how much is left?" answer from a check-in Custom tap?
+    if pend and pend["action"] == "checkin_remaining":
+        mins = P.parse_effort_min(text)
+        item = db.get_item(pend["item_id"])
+        db.clear_pending(chat_id)
+        if item is None:
+            await send_message(chat_id, "That item is gone.")
+        elif mins is None:
+            await send_message(chat_id, "Couldn't read that — try <i>2h</i>, <i>30m</i>, or <i>done</i>.")
+        elif mins == 0:
+            await mark_done(chat_id, item["id"])
+        else:
+            rem = apply_checkin(item, mins)
+            await send_message(chat_id, f"🕒 Updated — {rem // 60}h{rem % 60:02d}m left on #{item['id']}.")
+        return JSONResponse({"ok": True})
+
     await handle_capture(chat_id, text)
     return JSONResponse({"ok": True})
 
@@ -476,13 +714,15 @@ async def api_items(token: str = ""):
     now = P.now()
     soon = now + timedelta(days=2)
     buckets = {"overdue": [], "start_today": [], "due_soon": [],
-               "commitments": [], "ideas": [], "other": []}
+               "commitments": [], "waiting": [], "ideas": [], "other": []}
     for i in db.list_open():
         d = dict(i)
         due = P.parse_iso(i["due_at"])
         sb = P.parse_iso(i["start_by_at"])
         d["due_fmt"] = P.fmt(due)
-        if i["type"] == "idea":
+        if i["type"] == "waiting":
+            buckets["waiting"].append(d)
+        elif i["type"] == "idea":
             buckets["ideas"].append(d)
         elif due and due < now:
             buckets["overdue"].append(d)
@@ -494,7 +734,19 @@ async def api_items(token: str = ""):
             buckets["due_soon"].append(d)
         else:
             buckets["other"].append(d)
-    return {"buckets": buckets, "timelog": build_timelog_text()}
+
+    # capacity snapshot for the dashboard gauge
+    sched = [dict(r) for r in db.schedulable_open()]
+    cfg = capacity_settings()
+    cap_day, cap_week, wd = C._settings(cfg)
+    load = C.spread_load(sched, now.date(), wd)
+    cap = {
+        "today_min": round(load.get(now.date(), 0)),
+        "week_min": round(C.week_load(load, now.date())),
+        "cap_day_min": cap_day,
+        "cap_week_min": cap_week,
+    }
+    return {"buckets": buckets, "capacity": cap, "timelog": build_timelog_text()}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

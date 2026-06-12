@@ -64,3 +64,39 @@ def fmt(dt):
     if not dt:
         return ""
     return dt.strftime("%a %d %b · %I:%M %p").replace(" 0", " ")
+
+
+import re
+
+_EFFORT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)?", re.I)
+
+
+def parse_effort_min(text):
+    """Parse a free-text effort phrase into minutes, or None.
+
+    "2h" -> 120, "30m" -> 30, "1h30" -> 90, "90" -> 90 (bare number = minutes),
+    "half day" -> 240, "full day" -> 480, "none"/"0"/"done" -> 0.
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    if t in ("done", "finished", "complete", "none", "nothing", "0"):
+        return 0
+    if "half" in t and "day" in t:
+        return 240
+    if ("full" in t or "whole" in t) and "day" in t:
+        return 480
+    total = 0.0
+    found = False
+    for num, unit in _EFFORT_RE.findall(t):
+        if not num:
+            continue
+        val = float(num)
+        unit = (unit or "").lower()
+        if unit.startswith("h"):
+            total += val * 60
+        else:
+            # "m"/"min"/… or a bare number — treat as minutes
+            total += val
+        found = True
+    return int(round(total)) if found else None
