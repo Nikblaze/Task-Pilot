@@ -22,3 +22,4 @@ choice is logged here.
 | 15 | `__pycache__/llm.cpython-313.pyc` tracked despite .gitignore | Untrack via `git rm --cached` | Was committed before ignore added; should not be in repo |
 | 16 | Brainstorm approval gate | Overridden | User explicitly authorized full autonomous completion (YOLO) |
 | 17 | Test runner deps | Add `pytest`, `pytest-asyncio` to requirements (dev) | Needed for suite; harmless in prod image |
+| 18 | LLM model | Switch `sarvam-30b` → `sarvam-105b`; raise capture max_tokens 400→2000, when 60→1500 | 30b is a reasoning model that exhausts tokens mid-reasoning and returns `content=null` → every capture silently fell back to "note/no date". 105b finishes (~1400 tok) and emits valid JSON. Added `reasoning_content` fallback + ISO regex in `parse_when`. |

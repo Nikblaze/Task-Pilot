@@ -11,6 +11,7 @@ Everything else (briefings, reminders) is computed deterministically in Python.
 """
 import os
 import json
+import re
 from openai import OpenAI
 
 # import anthropic
@@ -24,7 +25,9 @@ _DEFAULT_BASE_URLS = {
 }
 _DEFAULT_MODELS = {
     "https://api.groq.com/openai/v1": "llama-3.3-70b-versatile",
-    "https://api.sarvam.ai/v1": "sarvam-30b",
+    # sarvam-30b is a reasoning model that never stops reasoning on ambiguous notes
+    # (content stays null) — 105b reliably emits the JSON. See DECISIONS.md #18.
+    "https://api.sarvam.ai/v1": "sarvam-105b",
 }
 
 
@@ -90,8 +93,19 @@ _WHEN_SYSTEM = """Return ONLY an ISO 8601 datetime (in the given timezone) for t
 phrase, or the bare word null. No prose. If no time of day is given, assume 09:00 local."""
 
 
+def _message_text(resp):
+    """Get the assistant text. Reasoning models (e.g. sarvam-30b) may leave `content`
+    null and put everything in `reasoning_content`; fall back to that so we can still
+    fish the JSON out of the tail."""
+    msg = resp.choices[0].message
+    text = msg.content
+    if not text:
+        text = getattr(msg, "reasoning_content", None) or ""
+    return text
+
+
 def _extract_json(text):
-    text = text.strip()
+    text = (text or "").strip()
     if text.startswith("```"):
         text = text.strip("`")
         text = text[text.find("{"):]
@@ -105,11 +119,11 @@ def parse_capture(note, now_iso, tz_name):
     """Returns a dict with type/title/person/due/effort_minutes/explicit_reminder."""
     try:
         resp = _get_client().chat.completions.create(
-            model=MODEL, max_tokens=400,
+            model=MODEL, max_tokens=2000,
             messages=[{"role": "system", "content": _CAPTURE_SYSTEM},
                         {"role": "user", "content": f"Current datetime: {now_iso} ({tz_name}).\nNote: {note}"}],
         )
-        text = resp.choices[0].message.content
+        text = _message_text(resp)
         data = _extract_json(text)
     except Exception:
         data = {}
@@ -128,11 +142,17 @@ def parse_when(phrase, now_iso, tz_name):
     """Parse a snooze/reschedule phrase into an ISO datetime, or None."""
     try:
         resp = _get_client().chat.completions.create(
-            model=MODEL, max_tokens=60,
+            model=MODEL, max_tokens=1500,
             messages=[{"role": "system", "content": _WHEN_SYSTEM},
                         {"role": "user", "content": f"Current datetime: {now_iso} ({tz_name}).\nPhrase: {phrase}"}],
         )
-        text = resp.choices[0].message.content.strip()
+        text = _message_text(resp).strip()
+        # reasoning models may wrap the answer; take the last ISO-looking token
+        if "null" in text.lower() and "T" not in text:
+            return None
+        m = re.search(r"\d{4}-\d{2}-\d{2}T[\d:.+\-]+", text)
+        if m:
+            return m.group(0)
         return None if text.lower().startswith("null") else text
     except Exception:
         return None
